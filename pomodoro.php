@@ -11,6 +11,7 @@
  * Pressjitsu, Inc.
  * https://pressjitsu.com
  */
+namespace Pressjitsu\Pomodoro;
 
 add_filter( 'override_load_textdomain', function( $plugin_override, $domain, $mofile ) {
 	if ( ! is_readable( $mofile ) )
@@ -36,6 +37,11 @@ class MoCache_Translation {
 	private $mofile = null;
 
 	/**
+	 * Cache file end marker.
+	 */
+	private $end = 'POMODORO_END_e867edfb-4a36-4643-8ad4-b95507068e44';
+
+	/**
 	 * Construct the main translation cache instance for a domain.
 	 *
 	 * @param string $mofile The path to the mo file.
@@ -46,13 +52,17 @@ class MoCache_Translation {
 		$this->mofile = apply_filters( 'load_textdomain_mofile', $mofile, $domain );
 		$this->domain = $domain;
 		$this->override = $override;
+		$temp_dir = get_temp_dir();
 
-		$filename = md5( serialize( array( $this->domain, $this->mofile ) ) );
-		$cache_file = sprintf( '%s/%s.mocache', untrailingslashit( sys_get_temp_dir() ), $filename );
+		$filename = md5( serialize( array( get_home_url(), $this->domain, $this->mofile ) ) );
+		if ( defined( 'POMODORO_CACHE_DIR' ) && POMODORO_CACHE_DIR && wp_mkdir_p( POMODORO_CACHE_DIR ) ) {
+			$temp_dir = POMODORO_CACHE_DIR;
+		}
+		$cache_file = sprintf( '%s/%s.mocache', untrailingslashit( $temp_dir ), $filename );
 
 		$mtime = filemtime( $this->mofile );
 
-		if ( file_exists( $cache_file ) ) {
+		if ( $file_exists = file_exists( $cache_file ) ) {
 			/**
 			 * Load cache.
 			 *
@@ -71,12 +81,25 @@ class MoCache_Translation {
 
 		$_this = &$this;
 
-		register_shutdown_function( function() use ( $cache_file, $_this, $mtime ) {
+		register_shutdown_function( function() use ( $cache_file, $_this, $mtime, $domain, $file_exists ) {
 			/**
 			 * New values have been found. Dump everything into a valid PHP script.
 			 */
-			if ( $this->busted ) {
-				file_put_contents( $cache_file, sprintf( '<?php $_mtime = %d; $_cache = %s;', $mtime, var_export( $_this->cache, true ) ), LOCK_EX );
+			if ( $_this->busted || ( empty( $_this->cache ) && ! $file_exists ) ) {
+				file_put_contents( "$cache_file.test", sprintf( '<?php $_mtime = %d; $_domain = %s; $_cache = %s; // %s', $mtime, var_export( $domain, true ), var_export( $_this->cache, true ), $this->end ), LOCK_EX );
+
+				// Test the file before committing.
+				$fp = fopen( "$cache_file.test", 'rb' );
+
+				fseek( $fp, -strlen( $_this->end ), SEEK_END );
+				if ( fgets( $fp ) == $_this->end ) {
+					rename( "$cache_file.test", $cache_file );
+				} else {
+					trigger_error( "pomodoro $cache_file.test cache file missing end marker." );
+					unlink( "$cache_file.test" );
+				}
+
+				fclose( $fp );
 			}
 		} );
 	}
@@ -85,8 +108,14 @@ class MoCache_Translation {
 		/**
 		 * Check cache first.
 		 */
-		if ( isset( $this->cache[ $cache_key ] ) )
+		if ( isset( $this->cache[ $cache_key ] ) ) {
 			return $this->cache[ $cache_key ];
+		}
+
+		/**
+		 * Bust it.
+		 */
+		$this->busted = true;
 
 		$translate_function = count( $args ) > 2 ? 'translate_plural' : 'translate';
 
@@ -94,31 +123,19 @@ class MoCache_Translation {
 		 * Merge overrides.
 		 */
 		if ( $this->override ) {
-			if ( ( $translation = call_user_func_array( array( $this->override, $translate_function ), $args ) ) != $text ) {
-				$this->busted = true;
-				return $this->cache[ $cache_key ] = $translation;
-			}
+			return $this->cache[ $cache_key ] = call_user_func_array( array( $this->override, $translate_function ), $args );
 		}
 
 		/**
 		 * Default Mo upstream.
 		 */
 		if ( ! $this->upstream ) {
-			$this->upstream = new Mo();
+			$this->upstream = new \Mo();
 			do_action( 'load_textdomain', $this->domain, $this->mofile );
 			$this->upstream->import_from_file( $this->mofile );
 		}
 
-		if ( ( $translation = call_user_func_array( array( $this->upstream, $translate_function ), $args ) ) != $text ) {
-			$this->busted = true;
-			return $this->cache[ $cache_key ] = $translation;
-		}
-
-		$translation = call_user_func_array( array( $this->upstream, $translate_function ), $args );
-
-		$this->busted = true;
-
-		return $this->cache[ $cache_key ] = $translation;
+		return $this->cache[ $cache_key ] = call_user_func_array( array( $this->upstream, $translate_function ), $args );
 	}
 
 	/**
@@ -143,4 +160,3 @@ class MoCache_Translation {
 		return md5( serialize( array( $args, $this->domain ) ) );
 	}
 }
-
